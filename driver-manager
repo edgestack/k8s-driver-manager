@@ -683,6 +683,12 @@ _unload_driver() {
     local gdrdrv_refs=0
 
     echo "Unloading NVIDIA driver kernel modules..."
+    if [ -f /sys/module/nvidia_drm/refcnt ]; then
+        nvidia_drm_refs=$(< /sys/module/nvidia_drm/refcnt)
+        rmmod_args+=("nvidia-drm")
+        ((++nvidia_deps))
+    fi
+
     if [ -f /sys/module/nvidia_modeset/refcnt ]; then
         nvidia_modeset_refs=$(< /sys/module/nvidia_modeset/refcnt)
         rmmod_args+=("nvidia-modeset")
