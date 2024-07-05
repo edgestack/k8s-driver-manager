@@ -19,7 +19,7 @@ GO       ?= go
 include $(CURDIR)/versions.mk
 
 ifeq ($(IMAGE_NAME),)
-REGISTRY ?= nvidia
+REGISTRY ?= registry.gitlab.com/sonaproject
 IMAGE_NAME = $(REGISTRY)/k8s-driver-manager
 endif
 

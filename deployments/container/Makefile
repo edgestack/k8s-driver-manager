@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-BUILD_MULTI_ARCH_IMAGES ?= no
+BUILD_MULTI_ARCH_IMAGES ?= true
 DOCKER ?= docker
 BUILDX =
 ifeq ($(BUILD_MULTI_ARCH_IMAGES),true)
@@ -23,13 +23,13 @@ endif
 include $(CURDIR)/versions.mk
 
 ifeq ($(IMAGE_NAME),)
-REGISTRY ?= nvidia
+REGISTRY ?= registry.gitlab.com/sonaproject
 IMAGE_NAME := $(REGISTRY)/k8s-driver-manager
 endif
 
 IMAGE_VERSION := $(VERSION)
 
-IMAGE_TAG ?= $(IMAGE_VERSION)-$(DIST)
+IMAGE_TAG ?= $(IMAGE_VERSION)
 IMAGE = $(IMAGE_NAME):$(IMAGE_TAG)
 
 OUT_IMAGE_NAME ?= $(IMAGE_NAME)
