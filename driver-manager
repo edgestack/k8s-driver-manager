@@ -44,10 +44,11 @@ USE_HOST_MOFED=${USE_HOST_MOFED:-"false"}
 
 _drain_k8s_node() {
     echo "Draining node ${NODE_NAME}..."
-    kubectl drain ${NODE_NAME} --ignore-daemonsets=true --force=${DRAIN_USE_FORCE} --pod-selector=${DRAIN_POD_SELECTOR_LABEL} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}
-    if [ "$?" != "0" ]; then
-        return 1
-    fi
+    echo "kubectl drain ${NODE_NAME} --ignore-daemonsets=true --disable-eviction=true --force=${DRAIN_USE_FORCE} --pod-selector=${DRAIN_POD_SELECTOR_LABEL} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}"
+    kubectl drain ${NODE_NAME} --ignore-daemonsets=true --disable-eviction=true --force=${DRAIN_USE_FORCE} --pod-selector=${DRAIN_POD_SELECTOR_LABEL} --delete-emptydir-data=${DRAIN_DELETE_EMPTYDIR_DATA} --timeout=${DRAIN_TIMEOUT_SECONDS}
+    #if [ "$?" != "0" ]; then
+    #    return 1
+    #fi
     return 0
 }
 
@@ -449,6 +450,12 @@ _reschedule_gpu_operator_components() {
         nvidia.com/gpu.deploy.sandbox-device-plugin=$(_maybe_set_true ${SANDBOX_PLUGIN_DEPLOYED}) \
         nvidia.com/gpu.deploy.vgpu-device-manager=$(_maybe_set_true ${VGPU_DEVICE_MANAGER_DEPLOYED})
 
+    kubectl label --overwrite \
+        node ${NODE_NAME} \
+	nvidia.com/gpu.deploy.sandbox-device-plugin="true" \
+	nvidia.com/gpu.deploy.sandbox-validator="true" \
+	nvidia.com/vgpu.config.state=""
+
     if [ "$?" != "0" ]; then
         return 1
     fi
@@ -572,15 +579,15 @@ _wait_for_mofed_driver() {
 
 uninstall_driver() {
     # don't attempt to un-install if driver is pre-installed on the node
-    if _host_driver; then
-        echo "NVIDIA GPU driver is already pre-installed on the node, disabling the containerized driver on the node"
-        kubectl label --overwrite \
-          node ${NODE_NAME} \
-          nvidia.com/gpu.deploy.driver=pre-installed
-        # add wait here as pod termination can take 30s due to default grace-period
-        sleep 60
-        exit 1
-    fi
+    #if _host_driver; then
+    #    echo "NVIDIA GPU driver is already pre-installed on the node, disabling the containerized driver on the node"
+    #    kubectl label --overwrite \
+    #      node ${NODE_NAME} \
+    #      nvidia.com/gpu.deploy.driver=pre-installed
+    #    # add wait here as pod termination can take 30s due to default grace-period
+    #    sleep 30
+    #    # exit 0
+    #fi
 
     # fetch current status of all component labels
     _fetch_current_labels
@@ -663,11 +670,50 @@ uninstall_driver() {
     exit 0
 }
 
+enable_vgpu_driver() {
+    echo "Load the nvidia and nvidia_vgpu_vfio kernel modules"
+    _load_driver
+
+    echo "Restart the nvidia-vgpu-mgr daemon"
+    nsenter --target 1 --mount --uts --ipc --net --pid systemctl restart nvidia-vgpu-mgr
+}
+
 preflight_check() {
     # TODO: add checks for driver package availability for current kernel
     # TODO: add checks for driver dependencies
     # TODO: add checks for entitlements(OCP)
     exit 0
+}
+
+# Load the kernel modules if they are currently not loaded.
+_load_driver() {
+    local modprobe_args=()
+    local nvidia_refs=0
+    local nvidia_vgpu_vfio_refs=0
+
+    echo "Loading NVIDIA driver kernel modules..."
+    if [ ! -d /sys/module/nvidia ]; then
+        nvidia_refs=0
+	modprobe_args+=("nvidia")
+    elif [ -f /sys/module/nvidia/refcnt ]; then
+	nvidia_refs=$(< /sys/module/nvidia/refcnt)
+        modprobe_args+=("nvidia")
+    fi
+
+    if [ ! -d /sys/module/nvidia_vgpu_vfio ]; then
+        nvidia_vgpu_vfio_refs=0
+        modprobe_args+=("nvidia_vgpu_vfio")
+    elif [ -f /sys/module/nvidia_vgpu_vfio/refcnt ]; then
+        nvidia_vgpu_vfio_refs=$(< /sys/module/nvidia_vgpu_vfio/refcnt)
+	modprobe_args+=("nvidia_vgpu_vfio")
+    fi
+
+    if [ ${nvidia_refs} -le 0 ] || [ ${nvidia_vgpu_vfio_refs} -le 0 ] ; then
+        for arg in "${modprobe_args[@]}"; do
+            echo "Loading kernel module $arg"
+            chroot /host /usr/sbin/modprobe "$arg"
+        done
+    fi
 }
 
 # Unload the kernel modules if they are currently loaded.
@@ -736,7 +782,10 @@ _unload_driver() {
         # run lsmod to debug module usage
         lsmod | grep nvidia
         echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
-        return 1
+
+	# we need to stop the nvidia-vgpu-mgr since the process blocks nvidia_vgpu_vfio module unloading
+	nsenter --target 1 --mount --uts --ipc --net --pid systemctl stop nvidia-vgpu-mgr
+	return 1
     fi
 
     if [ ${#rmmod_args[@]} -gt 0 ]; then
@@ -779,6 +828,7 @@ Usage: $0 COMMAND [ARG...]
 
 Commands:
   uninstall_driver
+  enable_vgpu_driver
   preflight_check
 EOF
     exit 1
@@ -790,6 +840,7 @@ fi
 command=$1; shift
 case "${command}" in
     uninstall_driver) ;;
+    enable_vgpu_driver) ;;
     preflight_check) ;;
     *) usage ;;
 esac

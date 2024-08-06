@@ -42,13 +42,13 @@ RUN set -eux; \
 ENV GOPATH /go
 ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
 
-RUN GOOS=linux go build -o nvdrain ./cmd/nvdrain
+RUN GOOS=linux GOARCH=${ARCH} go build -o nvdrain ./cmd/nvdrain
 
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST}
 
 ARG TARGETARCH
 
-RUN dnf install -y kmod
+RUN dnf install -y kmod lsof util-linux
 
 # Install K8s client to fetch node resources, cluster version and to perform cleanup of pods for driver unload
 RUN OS_ARCH=${TARGETARCH/x86_64/amd64} && OS_ARCH=${OS_ARCH/aarch64/arm64} && curl -o /usr/bin/kubectl -L "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${OS_ARCH}/kubectl";
