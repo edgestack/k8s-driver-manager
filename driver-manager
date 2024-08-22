@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -xe
+
 NODE_NAME=${NODE_NAME:?"Missing node name"}
 DRAIN_USE_FORCE=${DRAIN_USE_FORCE:-"false"}
 DRAIN_POD_SELECTOR_LABEL=${DRAIN_POD_SELECTOR_LABEL:-""}
@@ -678,6 +680,13 @@ enable_vgpu_driver() {
     nsenter --target 1 --mount --uts --ipc --net --pid systemctl restart nvidia-vgpu-mgr
 }
 
+
+restart_fabricmanager() {
+    echo "Restart the nvidia-fabricmanager daemon"
+    nsenter --target 1 --mount --uts --ipc --net --pid systemctl restart nvidia-fabricmanager
+}
+
+
 preflight_check() {
     # TODO: add checks for driver package availability for current kernel
     # TODO: add checks for driver dependencies
@@ -731,28 +740,28 @@ _unload_driver() {
     echo "Unloading NVIDIA driver kernel modules..."
     if [ -f /sys/module/nvidia_drm/refcnt ]; then
         nvidia_drm_refs=$(< /sys/module/nvidia_drm/refcnt)
-        rmmod_args+=("nvidia-drm")
+        rmmod_args+=("nvidia_drm")
         ((++nvidia_deps))
     fi
 
     if [ -f /sys/module/nvidia_modeset/refcnt ]; then
         nvidia_modeset_refs=$(< /sys/module/nvidia_modeset/refcnt)
-        rmmod_args+=("nvidia-modeset")
+        rmmod_args+=("nvidia_modeset")
         ((++nvidia_deps))
     fi
     if [ -f /sys/module/nvidia_uvm/refcnt ]; then
         nvidia_uvm_refs=$(< /sys/module/nvidia_uvm/refcnt)
-        rmmod_args+=("nvidia-uvm")
+        rmmod_args+=("nvidia_uvm")
         ((++nvidia_deps))
     fi
     if [ -f /sys/module/nvidia_peermem/refcnt ]; then
         nvidia_peermem_refs=$(< /sys/module/nvidia_peermem/refcnt)
-        rmmod_args+=("nvidia-peermem")
+        rmmod_args+=("nvidia_peermem")
         ((++nvidia_deps))
     fi
     if [ -f /sys/module/nvidia_fs/refcnt ]; then
         nvidia_fs_refs=$(< /sys/module/nvidia_fs/refcnt)
-        rmmod_args+=("nvidia-fs")
+        rmmod_args+=("nvidia_fs")
         ((++nvidia_deps))
     fi
     if [ -f /sys/module/nvidia_vgpu_vfio/refcnt ]; then
@@ -761,14 +770,24 @@ _unload_driver() {
         ((++nvidia_deps))
     fi
     if [ -f /sys/module/gdrdrv/refcnt ]; then
-            gdrdrv_refs=$(< /sys/module/gdrdrv/refcnt)
-            rmmod_args+=("gdrdrv")
-            ((++nvidia_deps))
+        gdrdrv_refs=$(< /sys/module/gdrdrv/refcnt)
+        rmmod_args+=("gdrdrv")
+        ((++nvidia_deps))
     fi
     if [ -f /sys/module/nvidia/refcnt ]; then
         nvidia_refs=$(< /sys/module/nvidia/refcnt)
         rmmod_args+=("nvidia")
     fi
+
+    echo ${nvidia_refs}
+    echo ${nvidia_deps}
+    echo ${nvidia_uvm_refs}
+    echo ${nvidia_modeset_refs}
+    echo ${nvidia_peermem_refs}
+    echo ${nvidia_vgpu_vfio_refs}
+    echo ${nvidia_fs_refs}
+    echo ${gdrdrv_refs}
+    echo ${rmmod_args}
 
     if [ ${nvidia_refs} -gt ${nvidia_deps} ] && [ ${nvidia_refs} -eq 2 ] && [[ " ${rmmod_args} " =~ " nvidia_vgpu_vfio " ]]; then
         # When cleaning up a previous vGPU Manager install, it is possible $nvidia_refs > $nvidia_deps
@@ -778,13 +797,32 @@ _unload_driver() {
         #     nvidia              35315712  2
         #     mdev                   24576  2 vfio_mdev,nvidia_vgpu_vfio
         :
-    elif [ ${nvidia_refs} -gt ${nvidia_deps} ] || [ ${nvidia_uvm_refs} -gt 0 ] || [ ${nvidia_modeset_refs} -gt 0 ] || [ ${nvidia_peermem_refs} -gt 0 ] || [ ${nvidia_vgpu_vfio_refs} -gt 0 ] || [ ${nvidia_fs_refs} -gt 0 ] || [ ${gdrdrv_refs} -gt 0 ]; then
+    elif [ ${nvidia_refs} -gt ${nvidia_deps} ] && [ ${nvidia_refs} -eq 1 ]; then
+	# When cleaning up a previous vGPU Manager install, it is possible $nvidia_refs > $nvidia_deps
+        # since nvidia_uvm holds 1 handles on the driver. Catch this case and proceed to unload driver modules.
+        #     $ lsmod | grep nvidia
+	#     nvidia              65658880  1
+        #     drm                   602112  5 drm_kms_helper,drm_shmem_helper,nvidia,mgag200
+	return 0
+    elif [ ${nvidia_refs} -gt 50 ] && [[ " ${rmmod_args} " =~ " nvidia " ]]; then
+	# Since nvidia-fabricmanager and SXM typed GPUs hold many kernel modules, we roughly estimate the number around 60
+	# nvidia              65691648  60
+        # drm                   622592  7 drm_kms_helper,drm_vram_helper,ast,nvidia,drm_ttm_helper,ttm
+	# run lsmod to debug module usage
+        lsmod | grep nvidia
+        echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
+
+	# we need to stop the nvidia-fabricmanager since the process blocks nvidia module unloading
+        nsenter --target 1 --mount --uts --ipc --net --pid systemctl stop nvidia-fabricmanager
+
+    elif [ ${nvidia_refs} -gt ${nvidia_deps} ] && [[ " ${rmmod_args} " =~ " nvidia_vgpu_vfio " ]]; then
         # run lsmod to debug module usage
         lsmod | grep nvidia
         echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
 
 	# we need to stop the nvidia-vgpu-mgr since the process blocks nvidia_vgpu_vfio module unloading
 	nsenter --target 1 --mount --uts --ipc --net --pid systemctl stop nvidia-vgpu-mgr
+
 	return 1
     fi
 
@@ -812,7 +850,7 @@ _cleanup_driver() {
     if [ "$?" != "0" ]; then
         return 1
     fi
-    _unmount_rootfs
+    # _unmount_rootfs
     if [ "$?" != "0" ]; then
         return 1
     fi
@@ -829,6 +867,7 @@ Usage: $0 COMMAND [ARG...]
 Commands:
   uninstall_driver
   enable_vgpu_driver
+  restart_fabricmanager
   preflight_check
 EOF
     exit 1
@@ -841,6 +880,7 @@ command=$1; shift
 case "${command}" in
     uninstall_driver) ;;
     enable_vgpu_driver) ;;
+    restart_fabricmanager) ;;
     preflight_check) ;;
     *) usage ;;
 esac
